@@ -7,6 +7,8 @@ set(OCCT_BRepFilletAPI_FILES
   BRepFilletAPI_MakeChamfer.hxx
   BRepFilletAPI_MakeFillet.cxx
   BRepFilletAPI_MakeFillet.hxx
+  BRepFilletAPI_MakeFilletNaive.cxx
+  BRepFilletAPI_MakeFilletNaive.hxx
   BRepFilletAPI_MakeFillet2d.cxx
   BRepFilletAPI_MakeFillet2d.hxx
   BRepFilletAPI_MakeFillet2d.lxx

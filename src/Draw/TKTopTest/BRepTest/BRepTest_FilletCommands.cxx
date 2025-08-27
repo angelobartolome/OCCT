@@ -20,6 +20,7 @@
 #include <Draw_Interpretor.hxx>
 #include <Draw_Appli.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
+#include <BRepFilletAPI_MakeFilletNaive.hxx>
 #include <BiTgte_Blend.hxx>
 #include <TopOpeBRepBuild_HBuilder.hxx>
 #include <TopAbs_ShapeEnum.hxx>
@@ -170,7 +171,7 @@ static Standard_Integer BLEND(Draw_Interpretor& di, Standard_Integer narg, const
       FSh = ChFi3d_Polynomial;
     }
   }
-  Rakk = new BRepFilletAPI_MakeFillet(V, FSh);
+  Rakk = new BRepFilletAPI_MakeFilletNaive(V, FSh, true);
   Rakk->SetParams(ta, tesp, t2d, t3d, t2d, fl);
   Rakk->SetContinuity(blend_cont, tapp_angle);
   Standard_Real    Rad;
