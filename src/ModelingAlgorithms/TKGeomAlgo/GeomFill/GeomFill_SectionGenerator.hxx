@@ -30,6 +30,8 @@
 #include <gp_Pnt2d.hxx>
 #include <gp_Vec2d.hxx>
 
+class Geom_Curve;
+
 //! Supplies profiler sections and endpoint derivatives for AppSurf approximation.
 class GeomFill_SectionGenerator : public GeomFill_Profiler
 {
@@ -44,6 +46,15 @@ public:
   //! @throws Standard_NullObject if Params is null
   //! @throws Standard_ConstructionError for invalid values; parameters remain unchanged
   Standard_EXPORT void SetParam(const occ::handle<NCollection_HArray1<double>>& Params);
+
+  //! Prescribes endpoint tangent fields using auxiliary sections. After common
+  //! profiling, the homogeneous difference Ht - H defines the tangent direction.
+  //! Null curves clear the constraint. Magnitudes may be rescaled by AppSurf.
+  //! Curves must have corresponding U parameterizations.
+  Standard_EXPORT void SetTangents(const occ::handle<Geom_Curve>& theFirst,
+                                   const occ::handle<Geom_Curve>& theLast);
+
+  Standard_EXPORT void Perform(const double theTolerance) override;
 
   //! Returns the pole counts, knot count and degree of the section curves.
   Standard_EXPORT void GetShape(int& NbPoles, int& NbKnots, int& Degree, int& NbPoles2d) const;
@@ -77,6 +88,7 @@ public:
 
 protected:
   occ::handle<NCollection_HArray1<double>> myParams;
+  occ::handle<Geom_Curve>                  myTangents[2];
 };
 
 #endif // _GeomFill_SectionGenerator_HeaderFile
