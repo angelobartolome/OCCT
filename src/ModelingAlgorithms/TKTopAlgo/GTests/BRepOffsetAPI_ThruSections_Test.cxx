@@ -426,32 +426,40 @@ TopoDS_Wire makeDerivativeProfile(const double theZ, const bool theRational = fa
     .Wire();
 }
 
-occ::handle<Geom_Curve> constantFields(const occ::handle<Geom_Curve>& theProfile,
-                                       const int                      theOrder,
-                                       const gp_Vec&                  theD1)
+occ::handle<Geom_BSplineCurve> tangentField(const occ::handle<Geom_BSplineCurve>& theProfile,
+                                            const gp_Vec&                         theDirection,
+                                            const bool theVarying = false)
 {
-  return theOrder == 0 ? nullptr : occ::down_cast<Geom_Curve>(theProfile->Translated(theD1));
+  auto aField = occ::down_cast<Geom_BSplineCurve>(theProfile->Copy());
+  for (int i = 1; i <= aField->NbPoles(); ++i)
+    aField->SetPole(i,
+                    aField->Pole(i).Translated(
+                      theDirection + (theVarying ? gp_Vec(0.1 * i, 0, 0.2 * i) : gp_Vec(0, 0, 0))));
+  return aField;
 }
 
-void checkEndDerivatives(const TopoDS_Shape& theShape,
-                         const bool          theFirst,
-                         const int           theOrder,
-                         const gp_Vec&       theD1)
+void checkEndDerivatives(const TopoDS_Shape&            theShape,
+                         const bool                     theFirst,
+                         const occ::handle<Geom_Curve>& theProfile,
+                         const occ::handle<Geom_Curve>& theField)
 {
-  if (theOrder == 0)
-    return;
   for (TopExp_Explorer anIt(theShape, TopAbs_FACE); anIt.More(); anIt.Next())
   {
     const auto aSurface = BRep_Tool::Surface(TopoDS::Face(anIt.Current()));
     double     u0, u1, v0, v1;
     aSurface->Bounds(u0, u1, v0, v1);
-    for (const double aFraction : {0.0, 0.2, 0.5, 0.8, 1.0})
+    for (const double u : {0.0, 0.2, 0.5, 0.8, 1.0})
     {
       gp_Pnt aPoint;
       gp_Vec aDU, aDV;
-      aSurface->D1(u0 + (u1 - u0) * aFraction, theFirst ? v0 : v1, aPoint, aDU, aDV);
-      EXPECT_GT(aDV.Dot(theD1), 0.0);
-      EXPECT_LT(aDV.Crossed(theD1).Magnitude() / (aDV.Magnitude() * theD1.Magnitude()), 1.e-8);
+      aSurface->D1(u0 + (u1 - u0) * u, theFirst ? v0 : v1, aPoint, aDU, aDV);
+      EXPECT_LT(aPoint.Distance(theProfile->Value(u)), 1.e-7);
+      if (theField.IsNull())
+        continue;
+      const gp_Vec aExpected(theProfile->Value(u), theField->Value(u));
+      EXPECT_GT(aDV.Dot(aExpected), 0.0);
+      EXPECT_LT(aDV.Crossed(aExpected).Magnitude() / (aDV.Magnitude() * aExpected.Magnitude()),
+                1.e-8);
     }
   }
 }
@@ -460,66 +468,70 @@ void checkEndDerivatives(const TopoDS_Shape& theShape,
 TEST(BRepOffsetAPI_ThruSections_Test, EndpointDerivatives_PreserveG1Directions)
 {
   for (const bool isRational : {false, true})
-    for (const int aCount : {2, 3, 4, 5, 10})
-      for (const auto aParam : {Approx_IsoParametric, Approx_ChordLength, Approx_Centripetal})
-        for (const int aFirstOrder : {0, 1})
-          for (const int aLastOrder : {0, 1})
+    for (const bool isVarying : {false, true})
+      for (const int aCount : {2, 3, 4, 5, 10})
+        for (const auto aParam : {Approx_IsoParametric, Approx_ChordLength, Approx_Centripetal})
+          for (const int anEnds : {1, 2, 3})
           {
-            if (aFirstOrder == 0 && aLastOrder == 0)
-              continue;
+            SCOPED_TRACE(testing::Message()
+                         << "rational=" << isRational << " varying=" << isVarying
+                         << " sections=" << aCount << " param=" << aParam << " ends=" << anEnds);
             BRepOffsetAPI_ThruSections aLoft;
             aLoft.CheckCompatibility(false);
             for (int i = 0; i < aCount; ++i)
               aLoft.AddWire(makeDerivativeProfile(2.0 * i + 0.5 * i * i, isRational));
-            const gp_Vec aFirstD1(0.2, 0, 2);
-            const gp_Vec aLastD1(-0.2, 0, 4);
-            aLoft.SetFirstSectionTangent(
-              constantFields(makeDerivativeCurve(0, isRational), aFirstOrder, aFirstD1));
             const double aLastZ = 2.0 * (aCount - 1) + 0.5 * (aCount - 1) * (aCount - 1);
-            aLoft.SetLastSectionTangent(
-              constantFields(makeDerivativeCurve(aLastZ, isRational), aLastOrder, aLastD1));
+            const auto   aFirst = makeDerivativeCurve(0, isRational);
+            const auto   aLast  = makeDerivativeCurve(aLastZ, isRational);
+            const occ::handle<Geom_Curve> aFirstField =
+              anEnds & 1 ? tangentField(aFirst, gp_Vec(0.2, 0, 2), isVarying) : nullptr;
+            const occ::handle<Geom_Curve> aLastField =
+              anEnds & 2 ? tangentField(aLast, gp_Vec(-0.2, 0, 4), isVarying) : nullptr;
+            aLoft.SetFirstSectionTangent(aFirstField);
+            aLoft.SetLastSectionTangent(aLastField);
             aLoft.SetParType(aParam);
             aLoft.Build();
             ASSERT_TRUE(aLoft.IsDone());
             EXPECT_TRUE(BRepCheck_Analyzer(aLoft.Shape()).IsValid());
-            checkEndDerivatives(aLoft.Shape(), true, aFirstOrder, aFirstD1);
-            checkEndDerivatives(aLoft.Shape(), false, aLastOrder, aLastD1);
+            checkEndDerivatives(aLoft.Shape(), true, aFirst, aFirstField);
+            checkEndDerivatives(aLoft.Shape(), false, aLast, aLastField);
           }
 }
 
 TEST(BRepOffsetAPI_ThruSections_Test, EndpointDerivatives_RespectDegreeLimit)
 {
-  for (const int anOrder : {1})
-    for (int aDegree = 1; aDegree <= 6; ++aDegree)
+  for (int aDegree = 1; aDegree <= 6; ++aDegree)
+  {
+    SCOPED_TRACE(aDegree);
+    BRepOffsetAPI_ThruSections aLoft;
+    aLoft.CheckCompatibility(false);
+    aLoft.AddWire(makeDerivativeProfile(0));
+    aLoft.AddWire(makeDerivativeProfile(5));
+    aLoft.SetFirstSectionTangent(tangentField(makeDerivativeCurve(0), gp_Vec(0, 0, 5)));
+    aLoft.SetLastSectionTangent(tangentField(makeDerivativeCurve(5), gp_Vec(0, 0, 5)));
+    aLoft.SetMaxDegree(aDegree);
+    aLoft.Build();
+    ASSERT_EQ(aLoft.IsDone(), aDegree >= 3);
+    if (aLoft.IsDone())
     {
-      BRepOffsetAPI_ThruSections aLoft;
-      aLoft.CheckCompatibility(false);
-      aLoft.AddWire(makeDerivativeProfile(0));
-      aLoft.AddWire(makeDerivativeProfile(5));
-      aLoft.SetFirstSectionTangent(
-        constantFields(makeDerivativeCurve(0), anOrder, gp_Vec(0, 0, 5)));
-      aLoft.SetLastSectionTangent(constantFields(makeDerivativeCurve(5), anOrder, gp_Vec(0, 0, 5)));
-      aLoft.SetMaxDegree(aDegree);
-      aLoft.Build();
-      ASSERT_EQ(aLoft.IsDone(), aDegree >= 2 * anOrder + 1);
-      if (aLoft.IsDone())
-      {
-        const auto aSurface = occ::down_cast<Geom_BSplineSurface>(
-          BRep_Tool::Surface(TopoDS::Face(TopExp_Explorer(aLoft.Shape(), TopAbs_FACE).Current())));
-        ASSERT_FALSE(aSurface.IsNull());
-        EXPECT_LE(aSurface->VDegree(), aDegree);
-      }
+      const auto aSurface = occ::down_cast<Geom_BSplineSurface>(
+        BRep_Tool::Surface(TopoDS::Face(TopExp_Explorer(aLoft.Shape(), TopAbs_FACE).Current())));
+      ASSERT_FALSE(aSurface.IsNull());
+      EXPECT_LE(aSurface->VDegree(), aDegree);
     }
+  }
 }
 
 TEST(BRepOffsetAPI_ThruSections_Test, EndpointDerivatives_RejectIncompatibleOptions)
 {
-  const auto aConstraint = constantFields(makeDerivativeCurve(0), 1, gp_Vec(0, 0, 5));
-  for (const bool isRuled : {false, true})
+  const auto aConstraint = tangentField(makeDerivativeCurve(0), gp_Vec(0, 0, 5));
+  // Ruled, variational and automatic profile compatibility modes are unsupported.
+  for (int aMode = 0; aMode < 3; ++aMode)
   {
-    BRepOffsetAPI_ThruSections aLoft(false, isRuled);
-    aLoft.CheckCompatibility(false);
-    aLoft.SetSmoothing(!isRuled);
+    SCOPED_TRACE(aMode);
+    BRepOffsetAPI_ThruSections aLoft(false, aMode == 0);
+    aLoft.CheckCompatibility(aMode == 2);
+    aLoft.SetSmoothing(aMode == 1);
     aLoft.AddWire(makeDerivativeProfile(0));
     aLoft.AddWire(makeDerivativeProfile(5));
     aLoft.SetFirstSectionTangent(aConstraint);
@@ -537,120 +549,41 @@ TEST(BRepOffsetAPI_ThruSections_Test, EndpointDerivatives_RejectIncompatibleOpti
   EXPECT_EQ(aPunctual.GetStatus(), BRepFill_ThruSectionErrorStatus_InvalidBoundaryConstraint);
 }
 
-TEST(BRepOffsetAPI_ThruSections_Test, EndpointDerivatives_ClosedSolidHasValidSeams)
+TEST(BRepOffsetAPI_ThruSections_Test, EndpointDerivatives_TaperedSolidHasValidSeams)
 {
-  BRepOffsetAPI_ThruSections aLoft(true);
-  aLoft.CheckCompatibility(false);
-  NCollection_Array1<gp_Pnt> aPoles(1, 5);
-  for (const double aZ : {0.0, 5.0, 10.0})
-  {
-    BRepBuilderAPI_MakePolygon aPolygon;
-    int                        anIndex = 1;
-    for (const gp_Pnt aPoint :
-         {gp_Pnt(-5, -5, aZ), gp_Pnt(5, -5, aZ), gp_Pnt(5, 5, aZ), gp_Pnt(-5, 5, aZ)})
-    {
-      aPolygon.Add(aPoint);
-      aPoles(anIndex++) = aPoint;
-    }
-    aPolygon.Close();
-    auto aWire = aPolygon.Wire();
-    aWire.Closed(false); // Closure must be detected from topology, not the cached flag.
-    aLoft.AddWire(aWire);
-  }
-  aPoles(5) = aPoles(1);
   NCollection_Array1<double> aKnots(1, 5);
   NCollection_Array1<int>    aMults(1, 5);
+  NCollection_Array1<gp_Pnt> aPoles(1, 5), aFirstField(1, 5), aLastField(1, 5);
+  aPoles(1) = gp_Pnt(-5, -5, 0);
+  aPoles(2) = gp_Pnt(5, -5, 0);
+  aPoles(3) = gp_Pnt(5, 5, 0);
+  aPoles(4) = gp_Pnt(-5, 5, 0);
+  aPoles(5) = aPoles(1);
   for (int i = 1; i <= 5; ++i)
   {
     aKnots(i) = i - 1;
     aMults(i) = i == 1 || i == 5 ? 2 : 1;
+    const gp_Vec aD1(-aPoles(i).X() / 5, -aPoles(i).Y() / 5, 1);
+    aFirstField(i) = aPoles(i).Translated(aD1);
+    aLastField(i)  = aPoles(i).Translated(3 * aD1);
   }
-  const occ::handle<Geom_Curve> aLast = new Geom_BSplineCurve(aPoles, aKnots, aMults, 1);
-  const auto aFirst = occ::down_cast<Geom_Curve>(aLast->Translated(gp_Vec(0, 0, -10)));
-  aLoft.SetFirstSectionTangent(constantFields(aFirst, 1, gp_Vec(0, 0, 5)));
-  aLoft.SetLastSectionTangent(constantFields(aLast, 1, gp_Vec(0, 0, 5)));
+  BRepOffsetAPI_ThruSections aLoft(true);
+  aLoft.CheckCompatibility(false);
+  for (int aSection = 0; aSection < 3; ++aSection)
+  {
+    BRepBuilderAPI_MakePolygon aPolygon;
+    for (int i = 1; i <= 4; ++i)
+      aPolygon.Add(aPoles(i).Translated(aSection * gp_Vec(aPoles(i), aFirstField(i))));
+    aPolygon.Close();
+    auto aWire = aPolygon.Wire();
+    aWire.Closed(false); // Detect closure from topology, not the cached flag.
+    aLoft.AddWire(aWire);
+  }
+  aLoft.SetFirstSectionTangent(new Geom_BSplineCurve(aFirstField, aKnots, aMults, 1));
+  aLoft.SetLastSectionTangent(new Geom_BSplineCurve(aLastField, aKnots, aMults, 1));
   aLoft.Build();
   ASSERT_TRUE(aLoft.IsDone());
   EXPECT_EQ(aLoft.Shape().ShapeType(), TopAbs_SOLID);
-  EXPECT_TRUE(BRepCheck_Analyzer(aLoft.Shape()).IsValid());
-}
-
-TEST(BRepOffsetAPI_ThruSections_Test, EndpointDerivativeFields_ProvidedByCaller)
-{
-  // The application supplies the auxiliary sections in the profile's U basis.
-  const auto        aWire  = makeDerivativeProfile(0, true);
-  const TopoDS_Edge anEdge = TopoDS::Edge(TopExp_Explorer(aWire, TopAbs_EDGE).Current());
-  double            aFirst, aLast;
-  const auto aBase = occ::down_cast<Geom_BSplineCurve>(BRep_Tool::Curve(anEdge, aFirst, aLast));
-  ASSERT_FALSE(aBase.IsNull());
-  const auto aTangent   = occ::down_cast<Geom_BSplineCurve>(aBase->Copy());
-  for (int i = 1; i <= aBase->NbPoles(); ++i)
-  {
-    const gp_Vec aD1(0.1 * i, 0, 2.0 + 0.2 * i);
-    aTangent->SetPole(i, aBase->Pole(i).Translated(aD1));
-  }
-  const auto                 aConstraint = aTangent;
-  BRepOffsetAPI_ThruSections aLoft;
-  aLoft.AddWire(aWire);
-  aLoft.AddWire(makeDerivativeProfile(5, true));
-  aLoft.SetFirstSectionTangent(aConstraint);
-  aLoft.Build();
-  EXPECT_FALSE(aLoft.IsDone());
-  EXPECT_EQ(aLoft.GetStatus(), BRepFill_ThruSectionErrorStatus_IncompatibleOptions);
-  aLoft.CheckCompatibility(false);
-  aLoft.Build();
-  ASSERT_TRUE(aLoft.IsDone());
-  EXPECT_TRUE(BRepCheck_Analyzer(aLoft.Shape()).IsValid());
-  const auto aSurface =
-    BRep_Tool::Surface(TopoDS::Face(TopExp_Explorer(aLoft.Shape(), TopAbs_FACE).Current()));
-  for (const double u : {0.0, 0.25, 0.5, 0.75, 1.0})
-  {
-    gp_Pnt aPoint;
-    gp_Vec aDU, aDV, aDUU, aDVV, aDUV;
-    aSurface->D2(u, 0, aPoint, aDU, aDV, aDUU, aDVV, aDUV);
-    const gp_Vec expected(aBase->Value(u), aTangent->Value(u));
-    EXPECT_GT(aDV.Dot(expected), 0.0);
-    EXPECT_LT(aDV.Crossed(expected).Magnitude() / (aDV.Magnitude() * expected.Magnitude()), 1.e-8);
-  }
-}
-
-TEST(BRepOffsetAPI_ThruSections_Test, CallerProvidedTaperedCornerFields)
-{
-  NCollection_Array1<double> aKnots(1, 5);
-  NCollection_Array1<int>    aMults(1, 5);
-  for (int i = 1; i <= 5; ++i)
-  {
-    aKnots(i) = i - 1;
-    aMults(i) = i == 1 || i == 5 ? 2 : 1;
-  }
-  NCollection_Array1<gp_Pnt> aP(1, 5), aT(1, 5), aC(1, 5);
-  aP(1) = gp_Pnt(-5, -5, 0);
-  aP(2) = gp_Pnt(5, -5, 0);
-  aP(3) = gp_Pnt(5, 5, 0);
-  aP(4) = gp_Pnt(-5, 5, 0);
-  aP(5) = aP(1);
-  BRepBuilderAPI_MakePolygon aFirst, aLast;
-  for (int i = 1; i <= 5; ++i)
-  {
-    const gp_Vec aD1(-aP(i).X() / 5, -aP(i).Y() / 5, 1);
-    aT(i) = aP(i).Translated(aD1);
-    aC(i) = aP(i).Translated(2 * aD1);
-    if (i < 5)
-    {
-      aFirst.Add(aP(i));
-      aLast.Add(aC(i));
-    }
-  }
-  aFirst.Close();
-  aLast.Close();
-  const occ::handle<Geom_Curve> aConstraint = new Geom_BSplineCurve(aT, aKnots, aMults, 1);
-  BRepOffsetAPI_ThruSections aLoft(true);
-  aLoft.CheckCompatibility(false);
-  aLoft.AddWire(aFirst.Wire());
-  aLoft.AddWire(aLast.Wire());
-  aLoft.SetFirstSectionTangent(aConstraint);
-  aLoft.Build();
-  ASSERT_TRUE(aLoft.IsDone());
   EXPECT_TRUE(BRepCheck_Analyzer(aLoft.Shape()).IsValid());
 }
 
@@ -675,7 +608,7 @@ TEST(BRepOffsetAPI_ThruSections_Test, EndpointFields_RejectOpenFieldOnClosedProf
   }
   aProfile.Close();
   const occ::handle<Geom_Curve> c = new Geom_BSplineCurve(p, k, m, 1);
-  gp_Trsf move;
+  gp_Trsf                       move;
   move.SetTranslation(gp_Vec(0, 0, 5));
   BRepOffsetAPI_ThruSections loft;
   loft.CheckCompatibility(false);
@@ -687,16 +620,23 @@ TEST(BRepOffsetAPI_ThruSections_Test, EndpointFields_RejectOpenFieldOnClosedProf
   EXPECT_EQ(loft.GetStatus(), BRepFill_ThruSectionErrorStatus_InvalidBoundaryConstraint);
 }
 
-TEST(BRepOffsetAPI_ThruSections_Test, EndpointTangents_Clear)
+TEST(BRepOffsetAPI_ThruSections_Test, EndpointTangents_ClearRestoresLinearLoft)
 {
   BRepOffsetAPI_ThruSections aLoft;
+  aLoft.CheckCompatibility(false);
   aLoft.AddWire(makeDerivativeProfile(0));
   aLoft.AddWire(makeDerivativeProfile(5));
-  aLoft.SetFirstSectionTangent(makeDerivativeCurve(2));
-  aLoft.CheckCompatibility(false);
+  aLoft.SetFirstSectionTangent(tangentField(makeDerivativeCurve(0), gp_Vec(0.2, 0, 2)));
+  aLoft.SetLastSectionTangent(tangentField(makeDerivativeCurve(5), gp_Vec(-0.2, 0, 4)));
   aLoft.Build();
   ASSERT_TRUE(aLoft.IsDone());
   aLoft.SetFirstSectionTangent({});
+  aLoft.SetLastSectionTangent({});
   aLoft.Build();
-  EXPECT_TRUE(aLoft.IsDone());
+  ASSERT_TRUE(aLoft.IsDone());
+  EXPECT_TRUE(BRepCheck_Analyzer(aLoft.Shape()).IsValid());
+  const auto aSurface = occ::down_cast<Geom_BSplineSurface>(
+    BRep_Tool::Surface(TopoDS::Face(TopExp_Explorer(aLoft.Shape(), TopAbs_FACE).Current())));
+  ASSERT_FALSE(aSurface.IsNull());
+  EXPECT_EQ(aSurface->VDegree(), 1);
 }
