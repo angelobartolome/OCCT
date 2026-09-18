@@ -518,10 +518,10 @@ int thrusections(Draw_Interpretor& di, int n, const char** a)
 
   delete Generator;
   Generator = new BRepOffsetAPI_ThruSections(issolid, isruled);
-  occ::handle<Geom_Curve>               aConstraints[2];
-  bool                                  IsMutableInput = true;
-  int                                   NbEdges        = 0;
-  bool                                  IsFirstWire    = false;
+  occ::handle<Geom_Curve> aConstraints[2];
+  bool                    IsMutableInput = true;
+  int                     NbEdges        = 0;
+  bool                    IsFirstWire    = false;
   for (int i = index + 2; i <= n - 1; i++)
   {
     if (!strcmp(a[i], "-safe"))
@@ -553,7 +553,7 @@ int thrusections(Draw_Interpretor& di, int n, const char** a)
       const char* anOrder = a[i] + (isFirst ? 7 : 6);
       if (anOrder[0] != '1')
         return 1;
-      auto&      aConstraint = aConstraints[isFirst ? 0 : 1];
+      auto& aConstraint = aConstraints[isFirst ? 0 : 1];
       if (!strcmp(anOrder + 1, "curve") && i + 1 < n)
       {
         const auto aCurve = DrawTrSurf::GetCurve(a[++i]);

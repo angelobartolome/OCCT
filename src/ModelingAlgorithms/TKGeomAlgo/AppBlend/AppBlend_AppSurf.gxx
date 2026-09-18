@@ -561,9 +561,8 @@ void AppBlend_AppSurf::InternalPerform(const occ::handle<TheLine>& Lin,
       // pour les courbes rationnelles il faut maintenant diviser
       // les poles par leurs poids respectifs
       double aWeight = newtabP2d->Value(k).X();
-      if (aWeight < gp::Resolution() || !std::isfinite(aWeight)
-          || !std::isfinite(newtabP(k).X()) || !std::isfinite(newtabP(k).Y())
-          || !std::isfinite(newtabP(k).Z()))
+      if (aWeight < gp::Resolution() || !std::isfinite(aWeight) || !std::isfinite(newtabP(k).X())
+          || !std::isfinite(newtabP(k).Y()) || !std::isfinite(newtabP(k).Z()))
       {
         done = false;
         return;

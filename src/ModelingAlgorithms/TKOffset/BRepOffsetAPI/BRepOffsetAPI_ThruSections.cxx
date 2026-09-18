@@ -285,11 +285,11 @@ void BRepOffsetAPI_ThruSections::Init(const bool isSolid, const bool ruled, cons
 {
   myFirstTangent.Nullify();
   myLastTangent.Nullify();
-  myIsSolid         = isSolid;
-  myIsRuled         = ruled;
-  myPres3d          = pres3d;
-  myWCheck          = true;
-  myMutableInput    = true;
+  myIsSolid      = isSolid;
+  myIsRuled      = ruled;
+  myPres3d       = pres3d;
+  myWCheck       = true;
+  myMutableInput = true;
   //----------------------------
   myParamType      = Approx_ChordLength;
   myDegMax         = 6;
