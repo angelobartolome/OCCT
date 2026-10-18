@@ -1886,10 +1886,30 @@ void ChFi3d_Builder::PerformIntersectionAtEnd(const int Index)
   int           nbsurf, nbedge;
   reg1    = false;
   reg2    = false;
-  nbsurf  = SeqFil.Length();
   nbedge  = spine->NbEdges();
   num     = ChFi3d_IndexOfSurfData(Vtx, stripe, sens);
   isfirst = (sens == 1);
+  // A piece of an extension whose walking failed on one side is kept with no face on that side
+  // (ChFi3d_Purge): it can't be intersected with the faces at the vertex. As PerformOneCorner and
+  // IntersectMoreCorner do, the surplus is removed.
+  if (isfirst)
+  {
+    for (; num < SeqFil.Length()
+           && ((SeqFil.Value(num)->IndexOfS1() == 0) || (SeqFil.Value(num)->IndexOfS2() == 0));)
+    {
+      SeqFil.Remove(num);
+    }
+  }
+  else
+  {
+    for (; num > 1
+           && ((SeqFil.Value(num)->IndexOfS1() == 0) || (SeqFil.Value(num)->IndexOfS2() == 0));)
+    {
+      SeqFil.Remove(num);
+      num--;
+    }
+  }
+  nbsurf = SeqFil.Length();
   ChFiDS_State state;
   if (isfirst)
   {
