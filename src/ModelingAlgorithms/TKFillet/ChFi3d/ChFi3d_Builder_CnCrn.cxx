@@ -66,6 +66,9 @@
 #include <Geom2d_Line.hxx>
 #include <Geom2d_TrimmedCurve.hxx>
 #include <Geom2dAdaptor_Curve.hxx>
+#include <Geom2dAPI_InterCurveCurve.hxx>
+#include <Geom2dConvert.hxx>
+#include <BSplCLib.hxx>
 #include <GeomLProp_CLProps.hxx>
 #include <Geom_BezierCurve.hxx>
 #include <Geom_BSplineSurface.hxx>
@@ -82,6 +85,8 @@
 #include <gp_Dir2d.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Pnt2d.hxx>
+#include <gp_Vec2d.hxx>
+#include <IntRes2d_IntersectionPoint.hxx>
 #include <math_Matrix.hxx>
 #include <PLib.hxx>
 #include <Precision.hxx>
@@ -263,6 +268,156 @@ static void cherche_edge1(const TopoDS_Face& F1, const TopoDS_Face& F2, TopoDS_E
   {
     throw Standard_ConstructionError("Failed to find edge");
   }
+}
+
+//=======================================================================
+// function : cherche_edge_skip_seam
+// purpose  : as ChFi3d_cherche_edge, find edge E of F containing vertex V
+//           other than the edges of Eused, and other than the sewing edge
+//           Seam (null if there is none).
+//=======================================================================
+
+static void cherche_edge_skip_seam(const TopoDS_Vertex&                    V,
+                                   const NCollection_Array1<TopoDS_Shape>& Eused,
+                                   const TopoDS_Edge&                      Seam,
+                                   const TopoDS_Face&                      F,
+                                   TopoDS_Edge&                            E,
+                                   TopoDS_Vertex&                          Vtx)
+{
+  NCollection_Array1<TopoDS_Shape> Eexcl(Eused.Lower(), Eused.Upper() + 1);
+  for (int ie = Eused.Lower(); ie <= Eused.Upper(); ie++)
+  {
+    Eexcl.SetValue(ie, Eused.Value(ie));
+  }
+  Eexcl.SetValue(Eexcl.Upper(), Seam);
+  ChFi3d_cherche_edge(V, Eexcl, F, E, Vtx);
+}
+
+//=======================================================================
+// function : SeamPeriod
+// purpose  : the vector between the two p-curves of the sewing edge Seam on F
+//=======================================================================
+
+static gp_Vec2d SeamPeriod(const TopoDS_Edge& Seam, const TopoDS_Face& F)
+{
+  double                    f, l;
+  occ::handle<Geom2d_Curve> c2df =
+    BRep_Tool::CurveOnSurface(TopoDS::Edge(Seam.Oriented(TopAbs_FORWARD)), F, f, l);
+  occ::handle<Geom2d_Curve> c2dr =
+    BRep_Tool::CurveOnSurface(TopoDS::Edge(Seam.Oriented(TopAbs_REVERSED)), F, f, l);
+  return gp_Vec2d(c2df->Value(f), c2dr->Value(f));
+}
+
+//=======================================================================
+// function : SeamCrossing
+// purpose  : find where pcurve, a curve on face F that may leave the parametric
+//           domain of F across its sewing edge Seam, crosses Seam strictly
+//           between its ends: parameter tcut on pcurve and tseam on Seam.
+//=======================================================================
+
+static bool SeamCrossing(const occ::handle<Geom2d_Curve>& pcurve,
+                         const TopoDS_Edge&               Seam,
+                         const TopoDS_Face&               F,
+                         double&                          tcut,
+                         double&                          tseam)
+{
+  double                    f, l;
+  occ::handle<Geom2d_Curve> c2df =
+    BRep_Tool::CurveOnSurface(TopoDS::Edge(Seam.Oriented(TopAbs_FORWARD)), F, f, l);
+  const gp_Vec2d period = SeamPeriod(Seam, F);
+  const double   first  = pcurve->FirstParameter();
+  const double   last   = pcurve->LastParameter();
+  const double   eps    = (last - first) * 1.e-6;
+  for (int k = -2; k <= 2; k++)
+  {
+    occ::handle<Geom2d_Curve> seam2d = occ::down_cast<Geom2d_Curve>(c2df->Translated(k * period));
+    occ::handle<Geom2d_Curve> trim2d = new Geom2d_TrimmedCurve(seam2d, f, l);
+    Geom2dAPI_InterCurveCurve inter(pcurve, trim2d, Precision::PConfusion());
+    for (int ip = 1; ip <= inter.NbPoints(); ip++)
+    {
+      const IntRes2d_IntersectionPoint& pint = inter.Intersector().Point(ip);
+      if (pint.ParamOnFirst() > first + eps && pint.ParamOnFirst() < last - eps)
+      {
+        tcut  = pint.ParamOnFirst();
+        tseam = pint.ParamOnSecond();
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+//=======================================================================
+// function : InDomain
+// purpose  : the curve c2d on face F, translated by the period of the sewing
+//           edge Seam of F if it lies beyond it
+//=======================================================================
+
+static occ::handle<Geom2d_Curve> InDomain(const occ::handle<Geom2d_Curve>& c2d,
+                                          const TopoDS_Edge&               Seam,
+                                          const TopoDS_Face&               F)
+{
+  double umin, umax, vmin, vmax;
+  BRepTools::UVBounds(F, umin, umax, vmin, vmax);
+  const gp_Vec2d period = SeamPeriod(Seam, F);
+  const gp_Pnt2d mid    = c2d->Value(0.5 * (c2d->FirstParameter() + c2d->LastParameter()));
+  for (int k : {0, -1, 1, -2, 2})
+  {
+    const gp_Pnt2d pk = mid.Translated(k * period);
+    if (pk.X() >= umin && pk.X() <= umax && pk.Y() >= vmin && pk.Y() <= vmax)
+    {
+      return k == 0 ? c2d : occ::down_cast<Geom2d_Curve>(c2d->Translated(k * period));
+    }
+  }
+  return c2d;
+}
+
+//=======================================================================
+// function : ParamOnPlate
+// purpose  : parameter of the point of the curve c2d on Plate surface Surf nearest
+//           to P, strictly between its ends (tguess if there is none). The parameter
+//           of the p-curves on Plate is close to that of the curves they are
+//           p-curves of, but not equal to it.
+//=======================================================================
+
+static double ParamOnPlate(const occ::handle<Geom2d_Curve>& c2d,
+                           const occ::handle<Geom_Surface>& Surf,
+                           const gp_Pnt&                    P,
+                           const double                     tguess)
+{
+  Adaptor3d_CurveOnSurface cplate(new Geom2dAdaptor_Curve(c2d), new GeomAdaptor_Surface(Surf));
+  Extrema_ExtPC            ext(P, cplate);
+  double                   t = tguess, dmin = RealLast();
+  for (int iext = 1; ext.IsDone() && iext <= ext.NbExt(); iext++)
+  {
+    const double text = ext.Point(iext).Parameter();
+    if (text > c2d->FirstParameter() && text < c2d->LastParameter()
+        && ext.SquareDistance(iext) < dmin)
+    {
+      dmin = ext.SquareDistance(iext);
+      t    = text;
+    }
+  }
+  return t;
+}
+
+//=======================================================================
+// function : PlatePiece
+// purpose  : the piece [t1,t2] of the curve c2d, parametrized on [u1,u2]
+//=======================================================================
+
+static occ::handle<Geom2d_Curve> PlatePiece(const occ::handle<Geom2d_Curve>& c2d,
+                                            const double                     t1,
+                                            const double                     t2,
+                                            const double                     u1,
+                                            const double                     u2)
+{
+  occ::handle<Geom2d_BSplineCurve> piece =
+    Geom2dConvert::CurveToBSplineCurve(new Geom2d_TrimmedCurve(c2d, t1, t2));
+  NCollection_Array1<double> knots(piece->Knots());
+  BSplCLib::Reparametrize(u1, u2, knots);
+  piece->SetKnots(knots);
+  return piece;
 }
 
 //=======================================================================
@@ -537,6 +692,7 @@ static void CalculDroite(const gp_Pnt2d&            p2d1,
 //=======================================================================
 // function : CalculBatten
 // purpose  : calcule a batten between curves 2d  curv2d1 and curv2d2 at points p2d1 and p2d2
+//           crossseam: the batten may cross the sewing edge of Face
 //=======================================================================
 
 static void CalculBatten(const occ::handle<GeomAdaptor_Surface>& ASurf,
@@ -553,6 +709,7 @@ static void CalculBatten(const occ::handle<GeomAdaptor_Surface>& ASurf,
                          const double                            picplusic,
                          const bool                              inverseic,
                          const bool                              inverseicplus,
+                         const bool                              crossseam,
                          occ::handle<Geom2d_Curve>&              pcurve)
 {
   bool isplane;
@@ -644,19 +801,24 @@ static void CalculBatten(const occ::handle<GeomAdaptor_Surface>& ASurf,
       bf.Update(umin, vmin, umax, vmax);
       double uminc, vminc, umaxc, vmaxc;
       bc.Get(uminc, vminc, umaxc, vmaxc);
-      if (uminc < umin - 1.e-7)
+      // a face closed by the sewing edge it may cross has no bound in that direction
+      const bool uclosed = crossseam && ASurf->IsUPeriodic()
+                           && umax - umin >= ASurf->UPeriod() - Precision::PConfusion();
+      const bool vclosed = crossseam && ASurf->IsVPeriodic()
+                           && vmax - vmin >= ASurf->VPeriod() - Precision::PConfusion();
+      if (!uclosed && uminc < umin - 1.e-7)
       {
         Ok = false;
       }
-      if (umaxc > umax + 1.e-7)
+      if (!uclosed && umaxc > umax + 1.e-7)
       {
         Ok = false;
       }
-      if (vminc < vmin - 1.e-7)
+      if (!vclosed && vminc < vmin - 1.e-7)
       {
         Ok = false;
       }
-      if (vmaxc > vmax + 1.e-7)
+      if (!vclosed && vmaxc > vmax + 1.e-7)
       {
         Ok = false;
       }
@@ -1274,6 +1436,10 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
   NCollection_Array1<bool>                       libre(0, size);
   NCollection_Array1<bool>                       tangentregul(0, size);
   NCollection_Array1<bool>                       isG1(0, size);
+  // connecting curves cut at the sewing edge: second piece, point on the edge, parameter of the cut
+  NCollection_Array1<int>    indcurveseam(0, size);
+  NCollection_Array1<int>    indptseam(0, size);
+  NCollection_Array1<double> parcut(0, size);
   //  for(int ind=0;ind<=size;ind++){
   int ind;
   for (ind = 0; ind <= size; ind++)
@@ -1290,6 +1456,9 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
     libre.SetValue(ind, false);
     tangentregul.SetValue(ind, false);
     isG1.SetValue(ind, false);
+    indcurveseam.SetValue(ind, 0);
+    indptseam.SetValue(ind, 0);
+    parcut.SetValue(ind, 0.);
   }
   NCollection_List<occ::handle<ChFiDS_Stripe>>::Iterator It;
   occ::handle<ChFiDS_Stripe>                             cd2, cdbid, cnext;
@@ -1327,6 +1496,31 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
       facecouture = fcur;
     }
   }
+  // On a periodic surface the sewing edge only closes the parametrization of its face: the face
+  // continues across it, so it is not an edge of the corner. Counted as one, it would get a point
+  // of its own, set back from the top by the size of the corner whatever the length of the edge,
+  // and the corner would depend on where the seam lies. The connecting curve on facecouture
+  // crosses it instead, and is cut there in the DS (SeamCrossing).
+  bool        seamcrossed = false;
+  TopoDS_Edge edgeskip;
+  if (couture)
+  {
+    occ::handle<Geom_Surface> Scouture = BRep_Tool::Surface(facecouture);
+    seamcrossed                        = Scouture->IsUPeriodic() || Scouture->IsVPeriodic();
+  }
+  if (seamcrossed)
+  {
+    edgeskip   = edgecouture;
+    int nbseam = 0;
+    for (NCollection_List<TopoDS_Shape>::Iterator ItE(myVEMap(V1)); ItE.More(); ItE.Next())
+    {
+      if (ItE.Value().IsSame(edgecouture))
+      {
+        nbseam++;
+      }
+    }
+    nedge -= nbseam / 2;
+  }
 
   // unused surfdata are removed
   RemoveSurfData(myVDataMap, myEFMap, edgecouture, facecouture, V1);
@@ -1357,7 +1551,7 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
       Ecur = CD.Value(0)->Spine()->Edges(CD.Value(0)->Spine()->NbEdges());
     }
     Evive.SetValue(0, Ecur);
-    ChFi3d_cherche_edge(V1, Evive, Fcur, Enext, VV);
+    cherche_edge_skip_seam(V1, Evive, edgeskip, Fcur, Enext, VV);
     trouve = !Enext.IsNull();
   }
   // find sum of all face normals at V1
@@ -1366,14 +1560,14 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
   int nbcouture = 0;
   for (ii = 1; ii < nedge; ii++)
   {
-    if (Fcur.IsSame(facecouture) && nbcouture == 0)
+    if (!seamcrossed && Fcur.IsSame(facecouture) && nbcouture == 0)
     {
       Enext = edgecouture;
       nbcouture++;
     }
     else
     {
-      ChFi3d_cherche_edge(V1, Evive, Fcur, Enext, VV);
+      cherche_edge_skip_seam(V1, Evive, edgeskip, Fcur, Enext, VV);
     }
     if (Enext.IsNull())
     {
@@ -2977,7 +3171,7 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
         }
 
         // in case of a sewing edge the parameters are reframed
-        if (couture)
+        if (couture && !seamcrossed)
         {
           bool   PI1 = false, PI2 = false;
           double xx;
@@ -3009,6 +3203,22 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
               xx = xx - 2 * M_PI;
             }
             p2d2.SetX(xx);
+          }
+        }
+        // on the face of a sewing edge that is not an edge of the corner, the connecting curve
+        // may cross it: the second point is reframed in the period nearest the first one
+        const bool onseamface = seamcrossed && Fvive.Value(ic, icplus).IsSame(facecouture);
+        if (onseamface)
+        {
+          if (Asurf->IsUPeriodic())
+          {
+            const double aPer = Asurf->UPeriod();
+            p2d2.SetX(p2d2.X() + aPer * std::round((p2d1.X() - p2d2.X()) / aPer));
+          }
+          if (Asurf->IsVPeriodic())
+          {
+            const double aPer = Asurf->VPeriod();
+            p2d2.SetY(p2d2.Y() + aPer * std::round((p2d1.Y() - p2d2.Y()) / aPer));
           }
         }
         xdir = p2d2.X() - p2d1.X();
@@ -3118,6 +3328,7 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
                          p.Value(icplus, ic),
                          inverseic,
                          inverseicplus,
+                         onseamface,
                          pcurve);
           }
 
@@ -3169,10 +3380,30 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
           }
 
           // storage in the DS
-          TopOpeBRepDS_Curve tcurv3d(curveint, maxapp1);
-          indcurve3d.SetValue(n3d, DStr.AddCurve(tcurv3d));
           pardeb = curveint->FirstParameter();
           parfin = curveint->LastParameter();
+          // a connecting curve crossing the sewing edge is stored in two pieces, one on each side
+          // of it, and the edge is limited at the crossing as the edges of the corner are
+          double     tseam = 0.;
+          const bool cutseam =
+            onseamface && SeamCrossing(pcurve, edgecouture, facecouture, parcut(n3d), tseam);
+          if (cutseam)
+          {
+            TopOpeBRepDS_Curve tcurv3d(new Geom_TrimmedCurve(curveint, pardeb, parcut(n3d)),
+                                       maxapp1);
+            indcurve3d.SetValue(n3d, DStr.AddCurve(tcurv3d));
+            TopOpeBRepDS_Curve tcurvseam(new Geom_TrimmedCurve(curveint, parcut(n3d), parfin),
+                                         maxapp1);
+            indcurveseam.SetValue(n3d, DStr.AddCurve(tcurvseam));
+            TopOpeBRepDS_Point tpseam(curveint->Value(parcut(n3d)),
+                                      std::max(maxapp1, BRep_Tool::Tolerance(edgecouture)));
+            indptseam.SetValue(n3d, DStr.AddPoint(tpseam));
+          }
+          else
+          {
+            TopOpeBRepDS_Curve tcurv3d(curveint, maxapp1);
+            indcurve3d.SetValue(n3d, DStr.AddCurve(tcurv3d));
+          }
           if (sharp.Value(icplus) && indpoint.Value(icplus, 0) == 0)
           {
             // it is necessary to initialize indpoint[icplus][0] and indpoint[icplus][1]
@@ -3194,13 +3425,41 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
                                          indpoint.Value(ic, 1),
                                          pardeb,
                                          IsVt1);
-          Interfp2 = ChFi3d_FilPointInDS(TopAbs_REVERSED,
-                                         indcurve3d.Value(n3d),
-                                         indpoint(icplus, 0),
-                                         parfin,
-                                         IsVt2);
-          DStr.ChangeCurveInterferences(indcurve3d.Value(n3d)).Append(Interfp1);
-          DStr.ChangeCurveInterferences(indcurve3d.Value(n3d)).Append(Interfp2);
+          if (cutseam)
+          {
+            Interfp2 = ChFi3d_FilPointInDS(TopAbs_REVERSED,
+                                           indcurve3d.Value(n3d),
+                                           indptseam(n3d),
+                                           parcut(n3d));
+            DStr.ChangeCurveInterferences(indcurve3d.Value(n3d)).Append(Interfp1);
+            DStr.ChangeCurveInterferences(indcurve3d.Value(n3d)).Append(Interfp2);
+            Interfp1 =
+              ChFi3d_FilPointInDS(TopAbs_FORWARD, indcurveseam(n3d), indptseam(n3d), parcut(n3d));
+            Interfp2 = ChFi3d_FilPointInDS(TopAbs_REVERSED,
+                                           indcurveseam(n3d),
+                                           indpoint(icplus, 0),
+                                           parfin,
+                                           IsVt2);
+            DStr.ChangeCurveInterferences(indcurveseam(n3d)).Append(Interfp1);
+            DStr.ChangeCurveInterferences(indcurveseam(n3d)).Append(Interfp2);
+
+            // limitation of the sewing edge
+            TopAbs_Orientation ori =
+              TopExp::FirstVertex(edgecouture).IsSame(V1) ? TopAbs_FORWARD : TopAbs_REVERSED;
+            int Iseam = DStr.AddShape(edgecouture);
+            DStr.ChangeShapeInterferences(Iseam).Append(
+              ChFi3d_FilPointInDS(ori, Iseam, indptseam(n3d), tseam));
+          }
+          else
+          {
+            Interfp2 = ChFi3d_FilPointInDS(TopAbs_REVERSED,
+                                           indcurve3d.Value(n3d),
+                                           indpoint(icplus, 0),
+                                           parfin,
+                                           IsVt2);
+            DStr.ChangeCurveInterferences(indcurve3d.Value(n3d)).Append(Interfp1);
+            DStr.ChangeCurveInterferences(indcurve3d.Value(n3d)).Append(Interfp2);
+          }
           if (!IsVt1)
           {
             TopOpeBRepDS_Point& tpt1 = DStr.ChangePoint(indpoint(ic, 1));
@@ -3234,9 +3493,29 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
           {
             OrientationAreteViveConsecutive(Fvive.Value(ic, icplus), Evive.Value(ic), V1, orinterf);
           }
-          Interfc =
-            ChFi3d_FilCurveInDS(indcurve3d.Value(n3d), numfa.Value(ic, icplus), pcurve, orinterf);
-          DStr.ChangeShapeInterferences(numfa.Value(ic, icplus)).Append(Interfc);
+          if (cutseam)
+          {
+            occ::handle<Geom2d_Curve> pcurve1 =
+              new Geom2d_TrimmedCurve(pcurve, pcurve->FirstParameter(), parcut(n3d));
+            occ::handle<Geom2d_Curve> pcurve2 =
+              new Geom2d_TrimmedCurve(pcurve, parcut(n3d), pcurve->LastParameter());
+            Interfc = ChFi3d_FilCurveInDS(indcurve3d.Value(n3d),
+                                          numfa.Value(ic, icplus),
+                                          InDomain(pcurve1, edgecouture, facecouture),
+                                          orinterf);
+            DStr.ChangeShapeInterferences(numfa.Value(ic, icplus)).Append(Interfc);
+            Interfc = ChFi3d_FilCurveInDS(indcurveseam(n3d),
+                                          numfa.Value(ic, icplus),
+                                          InDomain(pcurve2, edgecouture, facecouture),
+                                          orinterf);
+            DStr.ChangeShapeInterferences(numfa.Value(ic, icplus)).Append(Interfc);
+          }
+          else
+          {
+            Interfc =
+              ChFi3d_FilCurveInDS(indcurve3d.Value(n3d), numfa.Value(ic, icplus), pcurve, orinterf);
+            DStr.ChangeShapeInterferences(numfa.Value(ic, icplus)).Append(Interfc);
+          }
         }
       } // end of processing by edge
     } // end of the loop on edges
@@ -3786,10 +4065,39 @@ void ChFi3d_Builder::PerformMoreThreeCorner(const int Jndex, const int nconges)
               tpt11.Tolerance(tpt11.Tolerance() + apperror);
               tpt21.Tolerance(tpt21.Tolerance() + apperror);
             }
-            Interfc = ChFi3d_FilCurveInDS(indcurve3d.Value(n3d),
-                                          Isurf,
-                                          PSurf.Curves2d()->Value(n3d),
-                                          orien);
+            occ::handle<Geom2d_Curve> c2dplate = PSurf.Curves2d()->Value(n3d);
+            if (indcurveseam(n3d) != 0)
+            {
+              // the curve was cut at the sewing edge: so is its p-curve on Plate
+              TopOpeBRepDS_Curve& tcourb2 = DStr.ChangeCurve(indcurveseam(n3d));
+              tcourb2.Tolerance(tcourb2.Tolerance() + apperror);
+              TopOpeBRepDS_Point& tptseam = DStr.ChangePoint(indptseam(n3d));
+              tptseam.Tolerance(tptseam.Tolerance() + apperror);
+              const double tplate =
+                ParamOnPlate(c2dplate, Surf, DStr.Point(indptseam(n3d)).Point(), parcut(n3d));
+              Interfc = ChFi3d_FilCurveInDS(indcurveseam(n3d),
+                                            Isurf,
+                                            PlatePiece(c2dplate,
+                                                       tplate,
+                                                       c2dplate->LastParameter(),
+                                                       parcut(n3d),
+                                                       c2dplate->LastParameter()),
+                                            orien);
+              DStr.ChangeSurfaceInterferences(Isurf).Append(Interfc);
+              if (Order.Value(n3d) == 1)
+              {
+                regular.SetCurve(indcurveseam(n3d));
+                regular.SetS1(Isurf, false);
+                regular.SetS2(numfa.Value(ic, icplus));
+                myRegul.Append(regular);
+              }
+              c2dplate = PlatePiece(c2dplate,
+                                    c2dplate->FirstParameter(),
+                                    tplate,
+                                    c2dplate->FirstParameter(),
+                                    parcut(n3d));
+            }
+            Interfc = ChFi3d_FilCurveInDS(indcurve3d.Value(n3d), Isurf, c2dplate, orien);
             DStr.ChangeSurfaceInterferences(Isurf).Append(Interfc);
             if (Order.Value(n3d) == 1)
             {
